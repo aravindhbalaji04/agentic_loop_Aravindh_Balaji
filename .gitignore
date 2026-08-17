@@ -9,6 +9,9 @@ __pycache__/
 *$py.class
 *.so
 .Python
+build/
+dist/
+*.egg-info/
 
 # Virtual Environments
 .venv/
@@ -18,10 +21,17 @@ env/
 env.bak/
 venv.bak/
 
-# Testing & Coverage
+# Testing, Linting & Type Checking
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
+.nox/
+.tox/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
 
 # IDE & Editor files
 .vscode/
@@ -30,6 +40,7 @@ htmlcov/
 *.swo
 *~
 
-# OS artifacts
+# OS & Logs
 .DS_Store
 Thumbs.db
+*.log
