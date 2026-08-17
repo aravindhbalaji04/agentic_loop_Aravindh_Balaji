@@ -1,7 +1,7 @@
 # Runtime Configuration for Clarity Agentic Loop
 
 agent:
-  max_iterations: 3
+  max_iterations: 6
   target_friction_score: 0.0
   semantic_threshold: 0.55
   token_budget_warning: 4000

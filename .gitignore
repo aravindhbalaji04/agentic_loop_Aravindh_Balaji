@@ -48,3 +48,5 @@ htmlcov/
 .DS_Store
 Thumbs.db
 *.log
+*.jsonl
+agent_execution.jsonl
