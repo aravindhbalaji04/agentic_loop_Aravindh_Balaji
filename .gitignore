@@ -21,6 +21,10 @@ env/
 env.bak/
 venv.bak/
 
+# Agent Memory & Vector DB
+.agent_memory/
+.chroma/
+
 # Testing, Linting & Type Checking
 .pytest_cache/
 .mypy_cache/

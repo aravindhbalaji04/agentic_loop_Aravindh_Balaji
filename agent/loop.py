@@ -2,6 +2,7 @@ import json
 from typing import Dict, Any, List, Callable
 from agent.prompts import SYSTEM_PROMPT, REASONING_PROMPT_TEMPLATE
 from agent.tools import tools_schema, TOOL_HANDLERS
+from agent.memory_manager import save, recall
 
 def perceive(input_data: str) -> Dict[str, Any]:
     """
@@ -20,24 +21,40 @@ def perceive(input_data: str) -> Dict[str, Any]:
         "baseline_metrics": baseline_friction
     }
 
-def reason(observation: Dict[str, Any], memory: List[str], llm_call: Callable[[str, str], str]) -> Dict[str, Any]:
+def reason(observation: Dict[str, Any], session_memory: List[str], llm_call: Callable[[str, str], str]) -> Dict[str, Any]:
     """
     Call the LLM to decide what to do next.
-    Returns a plan dict: chosen action, parameters, reasoning trace.
+    Requirement: Reads persistent memory at the start and passes it as context.
     """
-    memory_context = "\n".join(f"- {m}" for m in memory[-4:]) if memory else "No prior attempts yet."
+    # 1. Read persistent memory
+    retrieved_past_memories = recall(query=observation["best_text"], limit=3)
+
+    # --- ADD THIS DEBUG PRINT ---
+    print("\n" + "#" * 60)
+    print(f"[CHROMADB RECALL] Found {len(retrieved_past_memories)} stored memories:")
+    for i, mem in enumerate(retrieved_past_memories, 1):
+        print(f"  {i}. {mem}")
+    print("#" * 60 + "\n")
+
+    retrieved_memory_str = (
+        "\n".join(f"- {m}" for m in retrieved_past_memories) 
+        if retrieved_past_memories 
+        else "No past persistent lessons found."
+    )
+    
+    session_context_str = "\n".join(f"- {m}" for m in session_memory[-3:]) if session_memory else "First session iteration."
     tools_doc = json.dumps(tools_schema, indent=2)
     
     prompt = REASONING_PROMPT_TEMPLATE.format(
         original_text=observation["original_text"],
         best_text=observation["best_text"],
-        memory_context=memory_context,
+        retrieved_memory=retrieved_memory_str,
+        memory_context=session_context_str,
         tools_doc=tools_doc
     )
     
     raw_response = llm_call(SYSTEM_PROMPT, prompt)
     
-    # Parse structured JSON plan emitted by LLM
     try:
         clean_json = raw_response.strip()
         if "```json" in clean_json:
@@ -56,12 +73,20 @@ def reason(observation: Dict[str, Any], memory: List[str], llm_call: Callable[[s
 
 def act(plan: Dict[str, Any], tools: Dict[str, Callable], observation: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Execute the planned action by calling the appropriate tools.
+    Execute the planned action by calling the appropriate tool.
     Returns the result of the action.
     """
     candidate = plan.get("candidate_text", "").strip()
     
-    # Execute Diagnostic Tools
+    if not candidate:
+        return {
+            "candidate_text": observation["best_text"],
+            "friction": {"friction_score": 99.0, "is_clear": False},
+            "integrity": {"safe": False, "retention_ratio": 0.0},
+            "reasoning_trace": "Empty candidate provided"
+        }
+    
+    # Run diagnostic tools
     friction_res = tools["score_clarity_friction"](candidate)
     integrity_res = tools["check_semantic_integrity"](
         original_text=observation["original_text"],
@@ -78,7 +103,7 @@ def act(plan: Dict[str, Any], tools: Dict[str, Callable], observation: Dict[str,
 def reflect(result: Dict[str, Any], observation: Dict[str, Any]) -> Dict[str, Any]:
     """
     Evaluate whether the goal was met.
-    Return a reflection dict: is_done flag, quality score, next instruction.
+    Requirement: Writes to persistent memory to record feedback, critiques, and lessons learned.
     """
     candidate = result["candidate_text"]
     friction = result["friction"]
@@ -88,64 +113,84 @@ def reflect(result: Dict[str, Any], observation: Dict[str, Any]) -> Dict[str, An
     
     # Gate 1: Check semantic preservation (Rollback trigger)
     if not integrity["safe"]:
+        feedback = (
+            f"CRITICAL DRIFT: Rewrite dropped essential concepts (Retention: {integrity['retention_ratio']*100}%). "
+            f"Must retain original technical nouns and metrics while untangling structure."
+        )
+        # Persistent write
+        save(feedback, metadata={"type": "semantic_drift", "score": curr_score})
+        
         return {
             "is_done": False,
             "status": "ROLLBACK",
             "accepted": False,
             "quality_score": curr_score,
-            "next_instruction": (
-                f"REJECTED: Lost core entities/meaning (Retention: {integrity['retention_ratio']*100}%). "
-                f"Rollback to best checkpoint: '{observation['best_text']}'."
-            )
+            "next_instruction": feedback
         }
-    
+
     # Gate 2: Check clarity friction improvement (Checkpoint trigger)
     if curr_score < best_score:
         is_clear = friction["is_clear"]
+        feedback = (
+            f"SUCCESSFUL PATTERN: Reduced friction score from {best_score} to {curr_score}. "
+            f"Resolved vague pronouns and unpacked nominalizations."
+        )
+        # Persistent write
+        save(feedback, metadata={"type": "success_pattern", "score": curr_score})
+        
         return {
             "is_done": is_clear,
             "status": "CHECKPOINT",
             "accepted": True,
             "quality_score": curr_score,
             "updated_best_text": candidate,
-            "next_instruction": (
-                f"ACCEPTED: Friction reduced from {best_score} to {curr_score}."
-                + (" Target clarity met!" if is_clear else " Further refinement needed.")
-            )
+            "next_instruction": feedback + (" Target clarity achieved!" if is_clear else " Further refinement needed.")
         }
     else:
+        feedback = (
+            f"INEFFECTIVE PATTERN: Revision failed to reduce friction ({curr_score} vs best {best_score}). "
+            f"Found {friction['nominalizations_count']} smothered verbs and {friction['vague_openers_count']} vague openers."
+        )
+        # Persistent write
+        save(feedback, metadata={"type": "friction_failure", "score": curr_score})
+        
         return {
             "is_done": False,
             "status": "ROLLBACK",
             "accepted": False,
             "quality_score": curr_score,
-            "next_instruction": f"REJECTED: Friction score did not improve ({curr_score} vs best {best_score})."
+            "next_instruction": feedback
         }
 
-def run_agentic_loop(input_text: str, llm_callable: Callable[[str, str], str]) -> str:
-    """Orchestrates perceive -> reason -> act -> reflect execution."""
+def run_agentic_loop(input_text: str, llm_callable: Callable[[str, str], str], reset_memory: bool = False) -> str:
+    """Orchestrates perceive -> reason -> act -> reflect execution with persistent memory."""
+    if reset_memory:
+        from agent.memory_manager import clear as clear_mem
+        clear_mem()
+        print("[MEMORY] Cleared persistent memory for a clean run.")
+
     observation = perceive(input_text)
-    memory: List[str] = [f"Initial Friction Score: {observation['best_friction_score']}"]
+    session_memory: List[str] = [f"Initial Friction Score: {observation['best_friction_score']}"]
     
     print(f"\n[PERCEIVE] Baseline Friction Score: {observation['best_friction_score']}")
     
     while observation["iteration"] < observation["max_iterations"]:
         observation["iteration"] += 1
-        print(f"\n{'='*20} ITERATION {observation['iteration']} {'='*20}")
+        print(f"\n{'='*25} ITERATION {observation['iteration']} {'='*25}")
         
-        # 1. REASON
-        plan = reason(observation, memory, llm_callable)
+        # 1. REASON (Reads persistent memory)
+        plan = reason(observation, session_memory, llm_callable)
         print(f"[REASON Trace]: {plan.get('reasoning_trace')}")
         
         # 2. ACT
         result = act(plan, TOOL_HANDLERS, observation)
         print(f"[ACT Candidate]: \"{result['candidate_text']}\"")
         
-        # 3. REFLECT
+        # 3. REFLECT (Writes to persistent memory)
         reflection = reflect(result, observation)
         print(f"[REFLECT Feedback]: {reflection['next_instruction']}")
         
-        memory.append(f"Iteration {observation['iteration']}: {reflection['next_instruction']}")
+        session_memory.append(f"Iteration {observation['iteration']}: {reflection['next_instruction']}")
         
         # Update State Checkpoints
         if reflection["accepted"]:
