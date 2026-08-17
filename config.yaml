@@ -1,0 +1,28 @@
+# Runtime Configuration for Clarity Agentic Loop
+
+agent:
+  max_iterations: 3
+  target_friction_score: 0.0
+  semantic_threshold: 0.55
+  token_budget_warning: 4000
+
+llm:
+  model_name: "gemini-3.6-flash"
+  temperature: 0.3
+  timeout_seconds: 30.0
+
+retry:
+  max_retries: 3
+  initial_delay_seconds: 1.0
+  backoff_multiplier: 2.0
+  jitter: true
+
+memory:
+  backend: "chromadb" # chromadb | fallback
+  persist_dir: "./.agent_memory"
+  collection_name: "clarity_agent_memory"
+  recall_limit: 3
+
+logging:
+  log_file: "agent_execution.jsonl"
+  log_to_stdout: true

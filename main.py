@@ -1,5 +1,4 @@
 import os
-import json
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -8,26 +7,33 @@ except ImportError:
 
 from google import genai
 from google.genai import types
+from agent.config import load_config
 from agent.loop import run_agentic_loop
 
-# Configure Gemini API Key
+# Load all parameters from config.yaml with env overrides
+config = load_config("config.yaml")
+
 api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-client = genai.Client(api_key=api_key) if api_key else genai.Client()
+if not api_key:
+    raise ValueError("GEMINI_API_KEY or GOOGLE_API_KEY is missing. Please set it in environment.")
+
+client = genai.Client(api_key=api_key)
 
 def llm_engine(system_prompt: str, user_prompt: str) -> str:
-    model_name = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    model_name = config["llm"]["model_name"]
+    temp = config["llm"]["temperature"]
     response = client.models.generate_content(
         model=model_name,
         contents=user_prompt,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
-            temperature=0.4,
+            temperature=temp,
+            response_mime_type="application/json"
         )
     )
     return response.text
 
 if __name__ == "__main__":
-    # A real paragraph burdened with nominalizations, passive voice, and ambiguous pronouns
     dense_input = (
         "The execution of the database migration was carried out by the infrastructure engineers. "
         "This is because of the fact that latency minimization was needed for client satisfaction. "
@@ -35,13 +41,19 @@ if __name__ == "__main__":
     )
 
     print("=" * 70)
-    print("STARTING ITERATIVE AGENTIC CLARITY REFINER")
+    print("STARTING HARNESS-WRAPPED PRODUCTION AGENTIC LOOP")
     print("=" * 70)
     print(f"ORIGINAL PARAGRAPH:\n\"{dense_input}\"\n")
 
-    final_result = run_agentic_loop(dense_input, llm_engine)
+    result = run_agentic_loop(
+        input_text=dense_input,
+        llm_callable=llm_engine,
+        config=config,
+        reset_memory=False
+    )
 
     print("\n" + "=" * 70)
-    print("FINAL REFINED OUTPUT:")
+    print(f"RUN SUMMARY [STATUS: {result['status']} | ITERATIONS: {result['iterations_completed']}]")
     print("=" * 70)
-    print(f"\"{final_result}\"\n")
+    print(f"FINAL OUTPUT:\n\"{result['final_text']}\"")
+    print(f"FINAL FRICTION SCORE: {result['final_friction_score']}\n")
